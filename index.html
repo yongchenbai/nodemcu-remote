@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<!--
+ * NodeMCU GPIO 远程控制页面（MQTT 版）
+ * 用途：当设备没有公网 IP 时，通过免费公共 MQTT 服务器从外网控制设备。
+ * 部署：把本文件改名为 index.html，上传到 GitHub 仓库并开启 GitHub Pages，
+ *       即可获得一个免费的公网网址，手机/电脑随时打开控制。
+ *
+ * 使用前：
+ *   1. 把下面的 MQTT_TOPIC_CMD 和 MQTT_TOPIC_STAT 改成与固件中完全一致的值。
+ *   2. MQTT 连接使用 EMQX 的公共 WebSocket 端口（wss，无需付费、无需注册）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>NodeMCU 远程控制</title>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js"></script>
+<script>if (typeof mqtt === 'undefined') document.write('<script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"><\/script>');</script>
+<style>
+  :root {
+    --btn-size: 88px;
+    --gap: 14px;
+    --font-size: 18px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; text-align: center; margin: 8px 0 4px; }
+  .sub { text-align: center; color: #94a3b8; font-size: 13px; margin-bottom: 14px; }
+  .conn {
+    text-align: center; font-size: 13px; margin-bottom: 16px;
+    padding: 6px 10px; border-radius: 8px;
+  }
+  .conn.ok { background: rgba(34,197,94,.15); color: #4ade80; }
+  .conn.no { background: rgba(239,68,68,.15); color: #f87171; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(var(--btn-size), 1fr));
+    gap: var(--gap);
+    max-width: 480px; margin: 0 auto;
+  }
+  .btn {
+    height: var(--btn-size);
+    border: none; border-radius: 16px;
+    background: linear-gradient(145deg, #3b82f6, #2563eb);
+    color: #fff; font-size: var(--font-size); font-weight: 600;
+    cursor: pointer; user-select: none;
+    box-shadow: 0 4px 12px rgba(37,99,235,.4);
+    transition: transform .08s, box-shadow .08s;
+  }
+  .btn:active { transform: scale(.94); }
+  .btn.active { background: linear-gradient(145deg, #ef4444, #dc2626); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .status {
+    text-align: center; margin-top: 18px;
+    font-size: 13px; color: #94a3b8; min-height: 18px;
+  }
+  .info {
+    max-width: 480px; margin: 18px auto 0;
+    font-size: 12px; color: #64748b; line-height: 1.6;
+    background: #1e293b; border-radius: 10px; padding: 12px;
+  }
+</style>
+</head>
+<body>
+  <h1>GPIO 远程脉冲控制</h1>
+  <div class="sub">通过 MQTT 控制 NodeMCU（无需公网 IP）</div>
+  <div class="conn no" id="conn">正在连接 MQTT...</div>
+  <div class="grid" id="grid"></div>
+  <div class="status" id="status">就绪</div>
+  <div class="info">
+    通道与引脚对应：<br>
+    1→D1(GPIO5) &nbsp; 2→D2(GPIO4) &nbsp; 3→D5(GPIO14)<br>
+    4→D6(GPIO12) &nbsp; 5→D7(GPIO13)<br>
+    点击按钮即发送 MQTT 指令，设备收到后输出低电平脉冲。
+  </div>
+
+<script>
+/* ===== 用户配置：必须与固件中的 MQTT_TOPIC 完全一致 ===== */
+const MQTT_HOST  = 'wss://broker.emqx.io:8084/mqtt';
+const MQTT_TOPIC_CMD  = 'nodemcu/gpio/baiyongchen_nodemcu/cmd';
+const MQTT_TOPIC_STAT = 'nodemcu/gpio/baiyongchen_nodemcu/stat';
+const MQTT_CLIENT_ID  = 'web_' + Math.random().toString(16).slice(2, 10);
+const CHANNELS = ['通道1(D1)','通道2(D2)','通道3(D5)','通道4(D6)','通道5(D7)'];
+/* ===================================================== */
+
+const grid = document.getElementById('grid');
+const statusEl = document.getElementById('status');
+const connEl = document.getElementById('conn');
+let client = null;
+
+CHANNELS.forEach((label, i) => {
+  const btn = document.createElement('button');
+  btn.className = 'btn';
+  btn.textContent = label;
+  btn.disabled = true;
+  btn.addEventListener('click', () => {
+    if (!client || !client.connected) return;
+    btn.classList.add('active');
+    statusEl.textContent = '通道 ' + (i+1) + ' 触发中...';
+    // 发送指令：纯数字通道索引
+    client.publish(MQTT_TOPIC_CMD, String(i));
+    setTimeout(() => btn.classList.remove('active'), 200);
+  });
+  grid.appendChild(btn);
+});
+
+function setConn(ok, text) {
+  connEl.className = 'conn ' + (ok ? 'ok' : 'no');
+  connEl.textContent = text;
+  document.querySelectorAll('.btn').forEach(b => b.disabled = !ok);
+}
+
+function connect() {
+  setConn(false, '正在连接 MQTT...');
+  client = mqtt.connect(MQTT_HOST, {
+    clientId: MQTT_CLIENT_ID,
+    clean: true,
+    connectTimeout: 8000,
+    reconnectPeriod: 3000
+  });
+
+  client.on('connect', () => {
+    setConn(true, 'MQTT 已连接，可以控制');
+    client.subscribe(MQTT_TOPIC_STAT);
+  });
+
+  client.on('message', (topic, payload) => {
+    if (topic === MQTT_TOPIC_STAT) {
+      statusEl.textContent = '设备反馈: ' + payload.toString();
+    }
+  });
+
+  client.on('error', (err) => {
+    setConn(false, 'MQTT 错误: ' + err.message);
+  });
+
+  client.on('close', () => {
+    setConn(false, 'MQTT 断开，正在重连...');
+  });
+}
+
+connect();
+</script>
+</body>
+</html>
